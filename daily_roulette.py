@@ -2,16 +2,47 @@ import random
 import requests
 import os
 import json
+from datetime import datetime
 
 INTEGRANTES = ["Juan", "Catriel", "Christian", "Sol", "Luis", "Mati", "Angel"]
+HISTORY_FILE = "history.json"
 
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, "r") as f:
+            return json.load(f)
+    return {"this_week": [], "last_week": [], "week_num": -1}
+
+def save_history(history):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=4)
 
 def run_roulette():
-    seleccionados = random.sample(INTEGRANTES, 2)
-    principal, suplente = seleccionados[0], seleccionados[1]
+    history = load_history()
+    today = datetime.now()
+    current_week = today.isocalendar()[1]
 
+    if history["week_num"] != current_week:
+        history["last_week"] = history["this_week"]
+        history["this_week"] = []
+        history["week_num"] = current_week
+
+    candidatos = [m for m in INTEGRANTES if m not in history["this_week"]]
+
+    prioridad = [m for m in candidatos if m not in history["last_week"]]
+
+    if prioridad:
+        principal = random.choice(prioridad)
+    else:
+        principal = random.choice(candidatos)
+
+    suplente = random.choice([m for m in INTEGRANTES if m != principal])
+
+    history["this_week"].append(principal)
+    save_history(history)
+
+    TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+    CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
     url = f"https://discord.com/api/v10/channels/{CHANNEL_ID}/messages"
     
     payload = {
@@ -23,19 +54,15 @@ def run_roulette():
                 {"name": "📝 Principal", "value": f"**{principal}**", "inline": True},
                 {"name": "🛡️ Suplente", "value": f"**{suplente}**", "inline": True}
             ],
-            "footer": {"text": "Daily Bot 🚀"}
+            "footer": {"text": f"Semana {current_week} • Daily Bot 🚀"}
         }]
     }
 
-    headers = {
-        "Authorization": f"Bot {TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    headers = {"Authorization": f"Bot {TOKEN}", "Content-Type": "application/json"}
+    response = requests.post(url, headers=headers, json=payload)
 
     if response.status_code in [200, 201]:
-        print(f"✅ Éxito: {principal} y {suplente} asignados.")
+        print(f"✅ Éxito: {principal} (Principal) y {suplente} (Suplente).")
     else:
         print(f"❌ Error {response.status_code}: {response.text}")
 
