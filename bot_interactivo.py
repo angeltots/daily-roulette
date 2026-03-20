@@ -202,6 +202,7 @@ async def ejecutar_ruleta(canal):
         mencion_suplente = get_mention(suplente)
         
         mensaje_texto = f"🔔 ¡Atención {mencion_principal}! Te toca la daily de hoy."
+        embed.description = "¡El destino ha decidido los responsables de las notas de hoy!"
         embed.add_field(name="📝 Principal", value=mencion_principal, inline=True)
         embed.add_field(name="🛡️ Suplente", value=mencion_suplente, inline=True)
         
