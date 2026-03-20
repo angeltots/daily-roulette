@@ -4,7 +4,7 @@ import requests
 import os
 import random
 import datetime as dt
-import pytz  # IMPORTANTE: Agregar a requirements.txt
+import pytz 
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from keep_alive import keep_alive
@@ -36,7 +36,6 @@ history_collection = db["historial_dailys"]
 logs_collection = db["logs_ejecucion"] 
 
 def get_now_arg():
-    """Retorna la fecha y hora actual en Argentina."""
     return dt.datetime.now(ARG_TZ)
 
 def get_db_history():
@@ -58,205 +57,153 @@ def guardar_log(evento, detalles):
         "detalles": detalles
     }
     logs_collection.insert_one(log_doc)
-    print(f"📝 Log guardado: {evento} ({ahora.strftime('%H:%M')} ART)")
+    print(f"📝 Log guardado: {evento}")
 
 def get_mention(nombre):
     user_id = INTEGRANTES_DATA.get(nombre)
     return f"<@{user_id}>" if user_id else nombre
 
-# --- LÓGICA CLICKUP ---
 def get_clickup_availability():
     if not CLICKUP_TOKEN:
-        guardar_log("Error ClickUp", "No se encontró el token de ClickUp")
         return None, {}, []
-
     url = f"https://api.clickup.com/api/v2/team/{TEAM_ID}/task"
     ahora_arg = get_now_arg()
     now_ms = int(ahora_arg.timestamp() * 1000)
-    
     headers = {"Authorization": CLICKUP_TOKEN, "Content-Type": "application/json"}
     params = {"include_closed": "true", "subtasks": "true"}
     
     try:
         response = requests.get(url, headers=headers, params=params)
         tasks_data = response.json().get("tasks", [])
-        
-        ausentes = {} 
-        cumpleañeros = []
-        motivo_cancelacion = None 
+        ausentes, cumpleañeros, motivo_cancelacion = {}, [], None 
 
         for task in tasks_data:
             name = task["name"].lower()
-            start = task.get("start_date")
-            due = task.get("due_date")
+            start, due = task.get("start_date"), task.get("due_date")
             en_rango = False 
-            
             if start and due:
                 en_rango = int(start) <= now_ms <= int(due)
             elif due and not start:
                 due_date_dt = dt.datetime.fromtimestamp(int(due) / 1000, tz=dt.timezone.utc).astimezone(ARG_TZ)
-                if due_date_dt.date() == ahora_arg.date():
-                    en_rango = True
+                if due_date_dt.date() == ahora_arg.date(): en_rango = True
             
             if en_rango:
-                if "feriado" in name or "argentina" in name:
-                    motivo_cancelacion = "Feriado Nacional 🇦🇷"
-                elif "free meetings day" in name:
-                    motivo_cancelacion = "Free Meetings Day 🚫📅"
-                
+                if "feriado" in name or "argentina" in name: motivo_cancelacion = "Feriado Nacional 🇦🇷"
+                elif "free meetings day" in name: motivo_cancelacion = "Free Meetings Day 🚫📅"
                 for persona in INTEGRANTES:
-                    partes = persona.lower().split()
-                    primer_nombre = partes[0]
-                    apellido = partes[-1]
-                    
-                    if primer_nombre in name or apellido in name or (primer_nombre == "christian" and "chris" in name):
-                        if "half people day" in name:
-                            ausentes[persona] = "Half People Day 🌗"
-                        elif "people day" in name:
-                            ausentes[persona] = "People Day 🌴"
-                        elif "vacaciones" in name:
-                            ausentes[persona] = "Vacaciones ✈️"
-                        elif "birthday" in name or "cumple" in name:
+                    p = persona.lower().split()
+                    if p[0] in name or p[-1] in name or (p[0] == "christian" and "chris" in name):
+                        if "half" in name: ausentes[persona] = "Half People Day 🌗"
+                        elif "vacaciones" in name: ausentes[persona] = "Vacaciones ✈️"
+                        elif "birth" in name or "cumple" in name:
                             ausentes[persona] = "Cumpleaños 🎉"
-                            if persona not in cumpleañeros:
-                                cumpleañeros.append(persona)
-                        else:
-                            ausentes[persona] = "Ausente 🛌"
-        
-        guardar_log("Lectura ClickUp Exitosa", {
-            "motivo_cancelacion": motivo_cancelacion,
-            "ausentes": ausentes,
-            "cumpleañeros": cumpleañeros
-        })
+                            if persona not in cumpleañeros: cumpleañeros.append(persona)
+                        else: ausentes[persona] = "Ausente 🛌"
         return motivo_cancelacion, ausentes, cumpleañeros
     except Exception as e:
-        guardar_log("Error ClickUp", str(e))
         return None, {}, []
 
-
 class SelectorNotas(discord.ui.Select):
-    def __init__(self, principal_asignado):
-        self.principal_asignado = principal_asignado
+    def __init__(self):
         opciones = [discord.SelectOption(label=nombre) for nombre in INTEGRANTES]
-        super().__init__(placeholder="¿Alguien más tomó las notas hoy?", min_values=1, max_values=1, options=opciones)
+        super().__init__(
+            placeholder="¿Alguien más tomó las notas hoy?",
+            min_values=1, max_values=1, options=opciones,
+            custom_id="selector_notas_v1" 
+        )
 
     async def callback(self, interaction: discord.Interaction):
-        # 1. Desactivamos el menú visualmente y avisamos a Discord que estamos trabajando
         self.disabled = True
-        # Usamos edit_message para responder a la interacción AL INSTANTE
         await interaction.response.edit_message(view=self.view)
 
         try:
-            # 2. Ahora sí, hacemos el laburo pesado de MongoDB sin apuro
+            embed = interaction.message.embeds[0]
+            principal_asignado = "Desconocido"
+            for field in embed.fields:
+                if "Principal" in field.name:
+                    u_id = field.value.replace("<@", "").replace(">", "").replace("!", "")
+                    for n, uid in INTEGRANTES_DATA.items():
+                        if uid == u_id: principal_asignado = n; break
+            
             anotador_real = self.values[0]
             hist = get_db_history()
+            if principal_asignado in hist["this_week"]: hist["this_week"].remove(principal_asignado)
+            if anotador_real not in hist["this_week"]: hist["this_week"].append(anotador_real)
             
-            if self.principal_asignado in hist["this_week"]:
-                hist["this_week"].remove(self.principal_asignado)
-            if anotador_real not in hist["this_week"]:
-                hist["this_week"].append(anotador_real)
-                
             save_db_history(hist) 
-            guardar_log("Cambio Manual de Notas", f"De {self.principal_asignado} a {anotador_real}")
-            
-           
-            await interaction.followup.send(
-                f"✅ ¡Hecho! Notas registradas a nombre de **{anotador_real}**. Base de datos actualizada 💾.",
-                ephemeral=True
-            )
-
+            guardar_log("Cambio Manual de Notas", f"De {principal_asignado} a {anotador_real}")
+            await interaction.followup.send(f"✅ Notas registradas a nombre de **{anotador_real}**.", ephemeral=True)
         except Exception as e:
-            print(f"🔥 Error en el callback: {e}")
-            await interaction.followup.send("Hubo un problema al conectar con la base de datos.", ephemeral=True)
+            print(f"🔥 Error: {e}")
 
 class VistaRuleta(discord.ui.View):
-    def __init__(self, principal_asignado):
+    def __init__(self):
         super().__init__(timeout=None) 
-        self.add_item(SelectorNotas(principal_asignado))
+        self.add_item(SelectorNotas())
 
 async def ejecutar_ruleta(canal):
-    motivo_cancelacion, ausentes_dict, cumpleañeros = get_clickup_availability()
+    motivo, ausentes_dict, cumples = get_clickup_availability()
     history = get_db_history()
     today = get_now_arg()
     current_week = today.isocalendar()[1]
-    ausentes_lista = list(ausentes_dict.keys()) 
-
+    
     embed = discord.Embed(title="🎲 Ruleta de la Daily", color=0x3498DB)
     embed.set_footer(text=f"Semana {current_week} • ART: {today.strftime('%d/%m/%Y')}")
     
-    if motivo_cancelacion:
-        mensaje_texto = f"🛑 ¡Hola equipo! Hoy no hay ruleta porque: **{motivo_cancelacion}**."
-        embed.description = "Día libre de notas. ⚡"
-        guardar_log("Ruleta Cancelada", motivo_cancelacion)
-        await canal.send(content=mensaje_texto, embed=embed)
+    if motivo:
+        await canal.send(content=f"🛑 Hoy no hay ruleta: **{motivo}**.", embed=embed)
         return
 
     if history["week_num"] != current_week:
-        history["last_week"] = history["this_week"]
-        history["this_week"] = []
-        history["week_num"] = current_week
+        history["last_week"], history["this_week"], history["week_num"] = history["this_week"], [], current_week
 
-    candidatos = [m for m in INTEGRANTES if m not in history["this_week"] and m not in ausentes_lista]
+    candidatos = [m for m in INTEGRANTES if m not in history["this_week"] and m not in ausentes_dict]
 
     if not candidatos:
-        mensaje_texto = "⚠️ No hay candidatos disponibles hoy."
-        guardar_log("Ruleta Sin Candidatos", "Todos ausentes o ya participaron")
-        await canal.send(content=mensaje_texto, embed=embed)
+        await canal.send(content="⚠️ No hay candidatos disponibles hoy.", embed=embed)
     else:
         prioridad = [m for m in candidatos if m not in history["last_week"]]
         principal = random.choice(prioridad) if prioridad else random.choice(candidatos)
-        posibles_suplentes = [m for m in INTEGRANTES if m != principal and m not in ausentes_lista]
+        posibles_suplentes = [m for m in INTEGRANTES if m != principal and m not in ausentes_dict]
         suplente = random.choice(posibles_suplentes) if posibles_suplentes else "N/A"
 
         history["this_week"].append(principal)
         save_db_history(history)
 
-        mencion_principal = get_mention(principal)
-        mencion_suplente = get_mention(suplente)
-        
-        mensaje_texto = f"🔔 ¡Atención {mencion_principal}! Te toca la daily de hoy."
+        mencion_p, mencion_s = get_mention(principal), get_mention(suplente)
         embed.description = "¡El destino ha decidido los responsables de las notas de hoy!"
-        embed.add_field(name="📝 Principal", value=mencion_principal, inline=True)
-        embed.add_field(name="🛡️ Suplente", value=mencion_suplente, inline=True)
+        embed.add_field(name="📝 Principal", value=mencion_p, inline=True)
+        embed.add_field(name="🛡️ Suplente", value=mencion_s, inline=True)
         
         if ausentes_dict:
-            texto_ausencias = "\n".join([f"• **{p}**: {m}" for p, m in ausentes_dict.items()])
-            embed.add_field(name="📋 Novedades", value=texto_ausencias, inline=False)
-
-        if cumpleañeros:
-            texto_cumple = "\n".join([f"🎉 ¡Feliz cumple {get_mention(c)}!" for c in cumpleañeros])
-            mensaje_texto += f"\n\n{texto_cumple}"
-            embed.add_field(name="🎁 Cumpleaños", value=texto_cumple, inline=False)
-            embed.color = 0xF1C40F
+            txt = "\n".join([f"• **{p}**: {m}" for p, m in ausentes_dict.items()])
+            embed.add_field(name="📋 Novedades", value=txt, inline=False)
+        if cumples:
+            txt = "\n".join([f"🎉 ¡Feliz cumple {get_mention(c)}!" for c in cumples])
+            embed.add_field(name="🎁 Cumpleaños", value=txt, inline=False)
 
         guardar_log("Sorteo Realizado", f"P: {principal} | S: {suplente}")
-        await canal.send(content=mensaje_texto, embed=embed, view=VistaRuleta(principal))
+        await canal.send(content=f"🔔 ¡Atención {mencion_p}! Te toca la daily.", embed=embed, view=VistaRuleta())
 
-
+# --- BOT SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-HORA_EJECUCION = dt.time(hour=17, minute=30, tzinfo=dt.timezone.utc)
-
-@tasks.loop(time=HORA_EJECUCION)
+@tasks.loop(time=dt.time(hour=17, minute=30, tzinfo=dt.timezone.utc))
 async def tarea_diaria_ruleta():
-    if get_now_arg().weekday() > 4: 
-        return
-    
-    canal = bot.get_channel(int(DISCORD_CHANNEL_ID))
-    if canal:
-        await ejecutar_ruleta(canal)
+    if get_now_arg().weekday() <= 4:
+        canal = bot.get_channel(int(DISCORD_CHANNEL_ID))
+        if canal: await ejecutar_ruleta(canal)
 
 @bot.event
 async def on_ready():
-    print(f"🚀 Bot {bot.user} encendido en Render")
-    if not tarea_diaria_ruleta.is_running():
-        tarea_diaria_ruleta.start()
+    print(f"🚀 Bot {bot.user} encendido")
+    bot.add_view(VistaRuleta()) # Registro de vista persistente
+    if not tarea_diaria_ruleta.is_running(): tarea_diaria_ruleta.start()
 
 @bot.command()
-async def ruleta(ctx):
-    await ejecutar_ruleta(ctx.channel)
+async def ruleta(ctx): await ejecutar_ruleta(ctx.channel)
 
 if __name__ == "__main__":
     keep_alive() 
