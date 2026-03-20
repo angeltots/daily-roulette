@@ -141,20 +141,33 @@ class SelectorNotas(discord.ui.Select):
         super().__init__(placeholder="¿Alguien más tomó las notas hoy?", min_values=1, max_values=1, options=opciones)
 
     async def callback(self, interaction: discord.Interaction):
-        anotador_real = self.values[0]
-        hist = get_db_history()
-        
-        if self.principal_asignado in hist["this_week"]:
-            hist["this_week"].remove(self.principal_asignado)
-        if anotador_real not in hist["this_week"]:
-            hist["this_week"].append(anotador_real)
+        # 1. Desactivamos el menú visualmente y avisamos a Discord que estamos trabajando
+        self.disabled = True
+        # Usamos edit_message para responder a la interacción AL INSTANTE
+        await interaction.response.edit_message(view=self.view)
+
+        try:
+            # 2. Ahora sí, hacemos el laburo pesado de MongoDB sin apuro
+            anotador_real = self.values[0]
+            hist = get_db_history()
             
-        save_db_history(hist) 
-        guardar_log("Cambio Manual de Notas", f"De {self.principal_asignado} a {anotador_real}")
-        
-        self.disabled = True 
-        await interaction.message.edit(view=self.view)
-        await interaction.response.send_message(f"✅ ¡Hecho! Notas registradas a nombre de **{anotador_real}**.")
+            if self.principal_asignado in hist["this_week"]:
+                hist["this_week"].remove(self.principal_asignado)
+            if anotador_real not in hist["this_week"]:
+                hist["this_week"].append(anotador_real)
+                
+            save_db_history(hist) 
+            guardar_log("Cambio Manual de Notas", f"De {self.principal_asignado} a {anotador_real}")
+            
+           
+            await interaction.followup.send(
+                f"✅ ¡Hecho! Notas registradas a nombre de **{anotador_real}**. Base de datos actualizada 💾.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            print(f"🔥 Error en el callback: {e}")
+            await interaction.followup.send("Hubo un problema al conectar con la base de datos.", ephemeral=True)
 
 class VistaRuleta(discord.ui.View):
     def __init__(self, principal_asignado):
